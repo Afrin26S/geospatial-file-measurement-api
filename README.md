@@ -329,20 +329,25 @@ test suite on every push and pull request.
 
 ## Learning
 
-> **EDIT THIS SECTION so it is in your own voice, then delete this note.**
-
-- **Degrees are not metres.** I had to separate "where something is" from "how big it is". Measuring
-  needs a projected CRS, and the right one depends on location, which is why I choose a UTM zone
-  per feature instead of one for the whole file.
-- **Two methods beat one.** Comparing the UTM result with a geodesic one showed a consistent 0.12 %
-  gap for my sample in Bengaluru. I traced it to the distance from the zone's central meridian,
-  and I now report the gap instead of hiding it.
-- **Untrusted uploads need defensive code.** Zip-slip, zip bombs, fake extensions and shapefiles
-  without a `.prj` are all realistic inputs. Writing test files for each case taught me to design the
-  error paths first.
-- **Tests with known answers.** Building a shape that is exactly 100 m × 100 m and checking it
-  returns 10 000 m² gave me far more confidence than checking that the code runs.
-- [EDIT: one sentence about something that was new to you or surprised you.]
+- **Degrees are not metres.** The main concept I had to learn was coordinate reference systems.
+  Latitude and longitude are angles, so one degree of longitude is about 108 km at Bengaluru and
+  shrinks further from the equator. Measuring area on raw coordinates gives meaningless numbers,
+  so each feature is transformed into its own UTM zone before it is measured.
+- **Check a result two ways.** I compared the UTM result with a geodesic calculation on the
+  WGS 84 ellipsoid. For my Bengaluru sample they differ by 0.12 %. UTM stretches distances slightly
+  away from the zone's central meridian, and the sample is about 280 km from it, so I report this
+  gap in every response instead of hiding it.
+- **Treat uploads as untrusted.** Zip-slip paths, zip bombs, fake extensions, corrupt files and
+  shapefiles without a `.prj` are all realistic inputs. I wrote a generator for broken and tricky
+  files (`make_test_files.py`) and ran each one through the API and the web UI. That pushed me to
+  design the error responses first.
+- **Tests with known answers.** A shape built to be exactly 100 m × 100 m must come back as
+  10,000 m² after a round trip through latitude/longitude. That gave me much more confidence than
+  a test that only checks the code runs.
+- **Verify beyond my own machine.** My first `git add .` staged the whole virtual environment, so
+  I learned to read `git status` before every commit. I also checked the project from a fresh
+  clone and with CI, since "it works on my laptop" proves little.
+- **I was surprised that the map labels appear in different scripts, because OpenStreetMap shows names in each region’s local language.**
 
 ## Future scope
 
