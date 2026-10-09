@@ -1,0 +1,9 @@
+@"
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+uploads/
+*.db
+.env
+"@ | Set-Content -Encoding ascii .gitignore

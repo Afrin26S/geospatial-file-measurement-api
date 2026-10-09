@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Geospatial File Measurement</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root{--ink:#1d2433;--mute:#667085;--line:#e4e7ec;--acc:#0b6bcb;--bad:#b42318;--ok:#067647;--warn:#b54708}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 system-ui,"Segoe UI",sans-serif;background:#f6f7f9;color:var(--ink)}
+header{padding:14px 24px;background:#10233f;color:#fff;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+header a{color:#9cc7ff;margin-left:14px}
+h1{font-size:18px;margin:0}
+main{max-width:1250px;margin:18px auto;padding:0 16px;display:grid;gap:16px}
+.card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px}
+.row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
+label{display:flex;flex-direction:column;font-size:12px;color:var(--mute);gap:4px}
+input,select,button{font:inherit;padding:7px 9px;border:1px solid #cfd4dc;border-radius:6px}
+button{background:var(--acc);color:#fff;border-color:var(--acc);cursor:pointer}
+.msg{margin-top:10px;min-height:20px}.err{color:var(--bad)}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{background:#eef2f7;border-radius:999px;padding:3px 10px;font-size:12px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+#map{height:460px;border-radius:8px;border:1px solid var(--line)}
+.tw{max-height:460px;overflow:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{position:sticky;top:0;background:#fff}
+tr[data-i]{cursor:pointer}tr[data-i]:hover,tr.on{background:#eaf3ff}
+.num{text-align:right}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.hint{color:var(--mute);font-size:12px}
+@media(max-width:850px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Geospatial File Measurement</h1>
+  <nav><a href="/docs">API docs</a></nav>
+</header>
+<main>
+  <section class="card">
+    <div class="row">
+      <label>Shapefile (.zip) or KML<input id="file" type="file" accept=".zip,.kml"></label>
+      <label>Assume CRS (optional)<input id="assume" placeholder="EPSG:4326" size="12"></label>
+      <label>Area unit
+        <select id="au"><option value="sq_m">m²</option><option value="sq_km">km²</option><option value="ha">hectares</option><option value="acre">acres</option><option value="sq_ft">ft²</option></select></label>
+      <label>Length unit
+        <select id="lu"><option value="m">m</option><option value="km">km</option><option value="ft">ft</option><option value="mi">miles</option></select></label>
+      <button id="go">Upload &amp; measure</button>
+    </div>
+    <div id="msg" class="msg hint">Try samples/test_bengaluru.kml. "Assume CRS" is only needed for a shapefile without a .prj.</div>
+    <div id="info" class="chips"></div>
+  </section>
+  <section id="out" class="grid" hidden>
+    <div class="card"><div id="map"></div><div id="note" class="hint"></div></div>
+    <div class="card"><div class="tw"><table>
+      <thead><tr><th>#</th><th>Type</th><th>Name</th><th class="num">Area</th><th class="num">Length</th><th class="num" title="Projected vs geodesic difference">Check %</th><th>Status</th></tr></thead>
+      <tbody id="rows"></tbody></table></div>
+      <p class="hint"><a id="raw" target="_blank">Open raw JSON</a> · "Check %" = difference between the UTM-projected and geodesic result.</p></div>
+  </section>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const AU = {sq_m:"m²", sq_km:"km²", ha:"ha", acre:"acres", sq_ft:"ft²"}, LU = {m:"m", km:"km", ft:"ft", mi:"mi"};
+const fmt = v => v == null ? "–" : Number(v).toLocaleString(undefined, {maximumFractionDigits: 4});
+let fileId = null, fileCrs = null, byIndex = new Map(), layer = null, layers = new Map();
+
+const map = L.map("map").setView([20.6, 78.9], 4);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {maxZoom: 19, attribution: "© OpenStreetMap contributors"}).addTo(map);
+
+function say(text, bad) { $("msg").textContent = text; $("msg").className = "msg" + (bad ? " err" : " hint"); }
+
+async function api(url, opts) {
+  const res = await fetch(url, opts);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) { const e = body.error || {}; throw new Error((e.code || res.status) + ": " + (e.message || res.statusText)); }
+  return body;
+}
+
+function title(f) { const p = f.properties || {}; return p.Name || p.name || p.NAME || ""; }
+function popup(f) {
+  const m = f.measurement, a = AU[$("au").value], l = LU[$("lu").value];
+  return `<b>#${f.feature_index} ${esc(f.geometry_type)}</b> ${esc(title(f))}<br>` +
+    (m.area != null ? `Area: ${fmt(m.area)} ${a}<br>` : "") + (m.length != null ? `Length: ${fmt(m.length)} ${l}<br>` : "") +
+    `Status: ${esc(m.status)}` + (m.projected_crs ? `<br>Projected CRS: ${esc(m.projected_crs)}` : "");
+}
+
+async function load() {
+  const au = $("au").value, lu = $("lu").value, feats = [];
+  let offset = 0, total = 1;
+  while (offset < total) {
+    const q = `area_unit=${au}&length_unit=${lu}&limit=1000&offset=${offset}`;
+    const page = await api(`/api/files/${fileId}/measurements/?${q}`);
+    total = page.total; feats.push(...page.features); offset += 1000;
+    if (!page.features.length) break;
+  }
+  byIndex = new Map(feats.map(f => [f.feature_index, f]));
+  $("raw").href = `/api/files/${fileId}/measurements/?area_unit=${au}&length_unit=${lu}`;
+  $("out").hidden = false;
+  map.invalidateSize();
+  drawTable(feats); drawMap(feats);
+}
+
+function drawTable(feats) {
+  const a = AU[$("au").value], l = LU[$("lu").value];
+  let area = 0, len = 0;
+  $("rows").innerHTML = feats.map(f => {
+    const m = f.measurement; area += m.area || 0; len += m.length || 0;
+    const cls = m.status === "measured" ? "ok" : m.status === "failed" ? "bad" : "warn";
+    const warn = m.warnings.length ? ` ⚠` : "";
+    return `<tr data-i="${f.feature_index}"><td>${f.feature_index}</td><td>${esc(f.geometry_type)}</td><td>${esc(title(f))}</td>` +
+      `<td class="num">${m.area != null ? fmt(m.area) + " " + a : "–"}</td><td class="num">${m.length != null ? fmt(m.length) + " " + l : "–"}</td>` +
+      `<td class="num">${fmt(m.discrepancy_pct)}</td><td class="${cls}" title="${esc(m.warnings.join("; "))}">${esc(m.status)}${warn}</td></tr>`;
+  }).join("");
+  $("info").lastElementChild?.classList.contains("tot") && $("info").lastElementChild.remove();
+  $("info").insertAdjacentHTML("beforeend", `<span class="chip tot">Total area: ${fmt(area)} ${a} · Total length: ${fmt(len)} ${l}</span>`);
+}
+
+function drawMap(feats) {
+  if (layer) { layer.remove(); layer = null; } layers.clear();
+  $("note").textContent = "";
+  if (fileCrs !== "EPSG:4326") { $("note").textContent = `Map preview needs EPSG:4326 coordinates; this file uses ${fileCrs}. The table is still correct.`; return; }
+  const fc = feats.filter(f => f.geometry).map(f => ({type: "Feature", geometry: f.geometry, properties: {i: f.feature_index}}));
+  layer = L.geoJSON(fc, {
+    pointToLayer: (_, ll) => L.circleMarker(ll, {radius: 7, color: "#0b6bcb"}),
+    style: () => ({color: "#0b6bcb", weight: 2, fillOpacity: 0.25}),
+    onEachFeature: (ft, lyr) => {
+      const i = ft.properties.i; layers.set(i, lyr);
+      lyr.bindPopup(() => popup(byIndex.get(i)));
+      lyr.on("click", () => mark(i));
+    }
+  }).addTo(map);
+  const b = layer.getBounds(); if (b.isValid()) map.fitBounds(b, {maxZoom: 18, padding: [24, 24]});
+}
+
+function mark(i) {
+  document.querySelectorAll("#rows tr").forEach(r => r.classList.toggle("on", Number(r.dataset.i) === i));
+  const r = document.querySelector(`#rows tr[data-i="${i}"]`); if (r) r.scrollIntoView({block: "nearest"});
+}
+
+$("rows").addEventListener("click", e => {
+  const tr = e.target.closest("tr"); if (!tr) return;
+  const i = Number(tr.dataset.i), lyr = layers.get(i); mark(i);
+  if (!lyr) return;
+  if (lyr.getBounds) map.fitBounds(lyr.getBounds(), {maxZoom: 18, padding: [40, 40]}); else map.setView(lyr.getLatLng(), 17);
+  lyr.openPopup();
+});
+
+$("go").addEventListener("click", async () => {
+  const f = $("file").files[0];
+  if (!f) return say("Choose a .zip (shapefile) or .kml file first.", true);
+  const fd = new FormData(); fd.append("file", f);
+  const crs = $("assume").value.trim();
+  say("Uploading and measuring…");
+  try {
+    const info = await api("/api/files/" + (crs ? "?assume_crs=" + encodeURIComponent(crs) : ""), {method: "POST", body: fd});
+    fileId = info.id; fileCrs = info.crs;
+    $("info").innerHTML = [`File: ${info.filename}`, `Status: ${info.status}`, `CRS: ${info.crs}${info.crs_assumed ? " (assumed)" : ""}`,
+      `Features: ${info.feature_count}`, `ID: ${info.id}`].map(t => `<span class="chip">${esc(t)}</span>`).join("");
+    say(""); await load();
+  } catch (e) { say(e.message, true); }
+});
+
+["au", "lu"].forEach(id => $(id).addEventListener("change", () => fileId && load().catch(e => say(e.message, true))));
+</script>
+</body>
+</html>
